@@ -1,0 +1,142 @@
+#!/usr/bin/perl
+=pod
+    pexec - a parallel execution script for shell commands.
+
+This tool takes in a shell script which contains commands which can all be run in parallel, 
+and dispatches them in many threads.
+
+   Usage: pexec [options] <shell-script> 
+
+switches:
+    -v     verbose  - reports progress on the job (every 10)
+    -e    estimate  - in conjunction with verbose, estimates the time to finish the job.
+options:
+    -n,--num-threads   - number of execution threads
+    -h,--help          - print help
+=cut
+
+sub VERSION_MESSAGE {
+    print "pexec v0.1\n";
+}
+
+sub pad {
+    my $x = shift ;
+    my $len = shift || 2;
+    my $char = shift || '0';
+    while (length($x)<$len) {
+        $x=$char.$x;
+    }
+    return $x;
+}
+
+sub hms_time {
+    my $sec = shift;
+
+    my $d=int($sec/(24*60*60));
+    my $h=($sec/(60*60))%24;
+    my $m=($sec/(60))%60;
+    my $s=($sec%60);
+
+    my $str = "";
+    my $ps=0;
+    my $pm=0;
+    if ($d != 0) { $str = "$d days, "; };
+    if ($h != 0) { $str = $str."$h:"; $m = &pad($m,2); $s=&pad($s,2); $pm=1; };
+    if ($pm || $m != 0) { $str = $str."$m:"; $s=&pad($s,2); $ps=1; };
+    if ($ps || $s != 0) { $str = $str."$s"; };
+    return $str;
+
+};
+
+use Parallel::ForkManager;
+use Getopt::Long;
+use Data::Dumper;
+
+# parse command line options
+
+GetOptions(\%opts,
+    'verbose|v',
+    'debug|d',
+    'report-interval|i=i',
+    'estimate-time|e',
+    'failed-list|f=s',
+    'num-threads|n=i'
+);
+
+if ($opts{'help'}) {
+    print HELP
+}
+
+# translate meanings
+my $verbose = $opts{'verbose'};
+my $debug   = $opts{'debug'};
+my $etd     = $opts{'estimate-time'};
+my $failed_list = $opts{'failed-list'};
+my $shell_script = shift @ARGV;
+my $numthreads = $opts{'num-threads'} || 64;
+my $verbose_cnt = $opts{'report-intereval'} || 10;
+
+die "pexec: Please specify a shell script! " unless $shell_script;
+die "pexec: $shell_script does not exist"    unless (-f $shell_script);
+
+$max_processes = $numthreads;
+
+if ($DEBUG) { print "v:$verbose e:$etd d:$debug s:$shell_script n:$numthreads vc:$verbose_cnt\n"; }
+
+# hard limit this for safety
+if ($max_processes<1) { $max_processes = 1; }
+if ($max_processes>512) { $max_processes = 512; }
+
+$pm = new Parallel::ForkManager($max_processes);
+
+$total = `wc $shell_script`;
+chomp $total;
+$total =~ s/^\s+//g;
+$total =~ s/\s+$//;
+$total =~ s/\s+.*//g;
+
+$cnt = 0;
+$|=1;
+$start_time = time;
+if ($failed_list ne "") { open(FAILED,">$failed_list") }
+
+$nsuccess = 0;
+$nfailed = 0;
+open(CMD,$shell_script);
+while (my $cmd = <CMD>) {
+    $cnt = $cnt +1;
+    if ($cnt % $verbose_cnt == 0) {
+        $statusline =  "\rdone $cnt of $total "; 
+        $ctime = time;
+        if ($etd && $ctime>$start_time) {
+            $speed = $cnt / ($ctime - $start_time);
+            $left = ($total - $cnt);
+            if ($speed>0) {
+                $ac_etd = int($left / $speed);
+                $ac_etotal = int($total / $speed);
+                $statusline = $statusline. " est time taken: ".&hms_time($ac_etotal)." time left: ".&hms_time($ac_etd);
+            }
+        } 
+        if ($verbose) { print "$statusline"; }
+    }
+
+    my $pid = $pm->start and next;
+    $res=system($cmd);
+    if ($res ne 0) {
+        if ($failed_list ne "") { print FAILED $cmd; }
+        $nfailed = $nfailed + 1;
+    } else {
+        $nsuccess= $nsuccess +1;
+    }
+    $pm->finish;
+}
+close(CMD);
+if ($failed_list ne "") { close(FAILED); }
+
+if ($nsuccess == 0 || $nfailed>0) {
+    $ntotal = $nsuccess+$nfailed;
+    print "WARNING: $nfailed/$ntotal failed.\n";
+    1;
+} else {
+    0;
+}
